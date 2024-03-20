@@ -1,4 +1,5 @@
 use binread::{BinRead, BinReaderExt};
+use ort::{Environment, LoggingLevel};
 use std::{
     error::Error,
     fs,
@@ -6,11 +7,10 @@ use std::{
 };
 
 // finished porting the following:
-// params.c
-// params.h
+// params.{c,h}
+// model_file.{c,h}
 
-// currently working on model_file.c
-// model_network_read
+// currently working on ort_util.c, april_model.c
 // WONTIMPLEMENT: transfer_strings_and_free_model
 
 const MAX_NETWORKS: u64 = 8;
@@ -30,7 +30,7 @@ pub struct LanguageHeader {
     language: [u8; 8],
 }
 
-#[derive(Debug, Clone, Copy, BinRead)]
+#[derive(Debug, Clone, Copy, BinRead, PartialEq, Eq)]
 #[br(repr = u32)]
 pub enum ModelType {
     ModelUnknown = 0,
@@ -175,6 +175,17 @@ pub struct Network {
     offset: u64,
     size: u64,
 }
+impl Network {
+    pub fn read<T>(self, cursor: &mut T) -> Result<Vec<u8>, Box<dyn Error>>
+    where
+        T: Read + Seek,
+    {
+        cursor.seek(std::io::SeekFrom::Start(self.offset))?;
+        let mut buf = vec![0; self.size as usize];
+        cursor.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+}
 
 #[derive(Debug)]
 pub struct ModelFile {
@@ -187,16 +198,6 @@ pub struct ModelFile {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // let environment = Environment::builder()
-    //     .with_name("test")
-    //     .with_log_level(LoggingLevel::Verbose)
-    //     .build()?
-    //     .into_arc();
-    // let mut session = SessionBuilder::new(&environment)?
-    //     .with_optimization_level(GraphOptimizationLevel::Level1)?
-    //     .with_intra_threads(1)?
-    //     .with_model_from_file("model.april")?;
-    // println!("session: {:#?}", session);
     let mut cursor = fs::File::open("model.april")?;
     let file_header: ModelFileHeader = cursor.read_ne()?;
     let lang_header: LanguageHeader = cursor.read_ne()?;
@@ -219,6 +220,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         params,
     };
 
-    println!("model file: {:#?}", model_file);
+    assert_eq!(
+        model_file.model_type,
+        ModelType::ModelLstmTransducerStateless
+    );
+
+    let environment = Environment::builder()
+        .with_name("aam")
+        .with_log_level(LoggingLevel::Verbose)
+        .build()?
+        .into_arc();
+
+    // Here's some repeated boilerplate because we can't clone a session builder
+    let encoder = model_file.params.networks[0].read(&mut cursor)?;
+    let encoder = ort::SessionBuilder::new(&environment)?
+        .with_inter_threads(1)?
+        .with_intra_threads(1)?
+        .with_model_from_memory(&encoder)?;
+
+    assert_eq!(encoder.inputs.len(), 3);
+    assert_eq!(encoder.outputs.len(), 3);
+
+    let decoder = model_file.params.networks[1].read(&mut cursor)?;
+    let decoder = ort::SessionBuilder::new(&environment)?
+        .with_inter_threads(1)?
+        .with_intra_threads(1)?
+        .with_model_from_memory(&decoder)?;
+
+    assert_eq!(decoder.inputs.len(), 1);
+    assert_eq!(decoder.outputs.len(), 1);
+
+    let joiner = model_file.params.networks[2].read(&mut cursor)?;
+    let joiner = ort::SessionBuilder::new(&environment)?
+        .with_inter_threads(1)?
+        .with_intra_threads(1)?
+        .with_model_from_memory(&joiner)?;
+
+    assert_eq!(joiner.inputs.len(), 2);
+    assert_eq!(joiner.outputs.len(), 1);
+
+    // assert_eq!(encoder.inputs[0].dimensions, 3);
+    // assert_eq!(encoder.outputs.len(), 3);
+
     Ok(())
 }
